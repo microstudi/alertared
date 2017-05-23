@@ -1,0 +1,238 @@
+#!/bin/bash
+#script inspirado en el creado por: franklin aliaga
+#script mejorado y actualizado por: Ivan Vergé(microstudi)
+#MODIFICADO POR Sergio Antonio Baranan Lombarte
+#	v2.0	para CENTOS y avisos por correo electronico
+#	v3.0	se anade archivo de configuracion e interfaz sin IP
+
+#declaracion de arrays
+declare -a IPS_CONOCIDAS
+declare -a MACS_CONOCIDAS
+
+#ARCHIVO DE CONFIRACION POR DEFECTO
+ARCH_CONF="$0.cfg"
+
+#########################
+#Configuracion adicional#
+#########################
+
+#Array de ip's conocidas, la primera debe ser la del router, no hace falta poner la propia
+#separar por espacios las ips
+IPS_CONOCIDAS=( )
+
+#Valor de la mac si Nmap no obtiene su valor
+FALLOMAC="entries"
+
+#####################
+#Menu de opciones
+#####################
+
+ERROR="SINTAXIS INCORRECTA. Ejecutar con -h para ayuda."	#Mensaje de error
+for opt in $@; do
+	if [ ! $FILE ]; then	#Si no existe archivo de configuracion
+		if [ "$opt" = "-h" ]; then
+			echo
+			echo "+-------------+"
+			echo "|alertared 3.0|"
+			echo "+-------------+"
+			echo
+			echo "Este script busca los host de una red y devuelve los conectados y su MAC."
+			echo "USO alertared, OPCIONES:"
+			echo " -h Muestra esta ayuda."
+			echo " -l Usa el script en modo LOG, es decir pone una linea por host"
+			echo " 		intruso con la fecha primero, no escribe ninguna otra informacion."
+			echo " -n No envia correo electronico."
+			echo " -m No hace uso del programa arp y no resuelve las MAC de los resultados."
+			echo " -a Devuelve todos los hosts encontrados independientemente de las"
+			echo " 		variables internas IPS_CONOCIDAS y MACS_CONOCIDAS."
+			echo " -f archivo Especificar en ULTIMO LUGAR el archivo de configuracion (opcional, por defecto"
+			echo " 		tiene el nombre del script con extension .cfg) que debera contener las"
+			echo " 		siguientes lineas:"
+			echo " 			1       Interfaz de red (eth0, wlan0, etc.)"
+			echo "			2       Bits de mascara de red (24=255.255.255.0, 16=255.255.0.0)"
+			echo "			3       Destinatario de correo para los avisos (usuario@dominio)"
+			echo "			4 y ss  MAC (a1:...) o nombre del dispositivo (opcional, precedido por #)"
+			exit
+		elif [ "$opt" == "-l" ]; then
+			LOG=1
+		elif [ "$opt" == "-n" ]; then
+			NONOTIFY=1
+		elif [ "$opt" == "-m" ]; then
+			NOMAC=1
+		elif [ "$opt" == "-a" ]; then
+			IPS_CONOCIDAS=( )
+			MACS_CONOCIDAS=( )
+		elif [ "$opt" == "-f" ]; then
+			FILE=1
+		else
+			echo 
+			echo "$ERROR"
+			echo
+			exit
+		fi
+	elif [ $FILE -eq 1 ]; then
+		ARCH_CONF=$opt
+		FILE=0
+	else
+		echo
+		echo "$ERROR"
+		echo
+		exit
+	fi
+done
+
+#Comprobamos la existencia del archivo de configuracion
+if [ ! -f $ARCH_CONF ]; then
+	echo
+	echo "No existe el archivo \"$ARCH_CONF\"."
+	echo
+	exit
+fi
+
+l=1     #Contador de lineas
+#Lectura del archivo de configuracion
+while read line
+do
+        if [ $l -eq 1 ]; then
+                DEVICE=$line
+        elif [ $l -eq 2 ]; then
+                MASK=$line
+        elif [ $l -eq 3 ]; then
+                CORREO=$line
+        else
+                if [ "${line:0:1}" != "#" ]; then
+                        MACS_CONOCIDAS=("${MACS_CONOCIDAS[@]} $line")
+                fi
+        fi
+        ((l++))
+done < $ARCH_CONF
+
+#aqui obtenemos la nuestra ip
+ip=$(/sbin/ifconfig "$DEVICE" | grep "inet" | awk '{print $2}' | cut -c 6-)
+if [ ! $LOG ]; then
+	echo "Mi ip: $ip"
+fi
+
+#anadimos nuestra IP al array
+IPS_CONOCIDAS[${#IPS_CONOCIDAS}]=$ip
+if [ ! $LOG ]; then
+	echo "No se controlan los equipos siguientes: "${IPS_CONOCIDAS}
+	if [ "${MACS_CONOCIDAS}" != "" ] && [ ! $NOMAC ]; then
+		echo "No se controlan los equipos con las MAC siguientes: "${MACS_CONOCIDAS}
+	fi
+fi
+
+#Comprobar si existen los programas que usaremos:
+if [ ! -x /usr/bin/nmap ]; then
+	echo "El programa nmap no esta instalado."
+	exit
+fi
+if [ ! $NOMAC ] && [ ! -x /sbin/arp ]; then
+	echo "El programa arp no esta instalado."
+	echo "Puedes llamar al programa con la opcion -m para no usar arp"
+	exit
+fi
+
+#con este comnado de nmap nos muestra los hosts conectados
+#y los guarda en el fichero "-" que es la salida standard
+#redireccionada a la variable variable HOST_IPS
+if [ ! $LOG ]; then
+	echo "Buscando equipos..."
+fi
+HOST_IPS=$(/usr/bin/nmap -sP ${IPS_CONOCIDAS[0]}/$MASK -oG -)
+
+#aqui cortamos el formato obtenido anteriormente de archivo para solo obtener las ip's
+IPS=$(echo "$HOST_IPS" | grep Host | cut -c 7-20 | tr -d "()")
+
+#aqui capturamos el numero de lineas que tiene nuestro archivo
+#en este caso la cantidad de ip's que hay en el archivo "-" (entrada standard)
+contador=$(echo "$IPS" | wc -l - | cut -c 1-2)
+total=$(expr $contador - 1)
+
+#esto es para que el script tenga acceso a las X des de crontab
+export DISPLAY=:0
+export XAUTHORITY="$HOME/.Xauthority"
+
+#Si no hay IP,s se salta el bucle
+if [ $total -gt 0 ]; then
+	#Bucle de busquedaa entre las ip's encontradas
+	var=0
+	while [ $var -le $total ]; do
+		SALTA_BUCLE=0
+		let var=$var+1
+		#capturamos la ip por linea
+		linea=$(echo "$IPS" | sed -n "$var p")
+		#quitamos espacios sobrantes
+		linea=${linea/ /}
+		for i in ${IPS_CONOCIDAS}; do
+			if [ "$i" == "$linea" ]; then
+				if [ ! $LOG ]; then
+					echo "La IP $linea esta en la red conocida"
+				fi
+				SALTA_BUCLE=1
+				break
+			fi
+		done
+		if [ "$SALTA_BUCLE" == "1" ]; then
+			continue
+		fi
+		#obtenemos informacion de la ip
+		if [ ! $NOMAC ]; then
+			ARP=$(/sbin/arp -a $linea)
+		else
+			ARP=""
+		fi
+		#nos quedamos con la mac
+		MAC=$(echo "$ARP" | awk '{print $4}')
+		#quitamos espacios sobrantes
+		MAC=${MAC/ /}
+		#Si no se encuentra MAC con Nmap
+		if [ "$MAC" == "$FALLOMAC" ]; then
+			#hacemos ping para averiguarla
+			if [ ! $LOG ]; then
+				echo "Haciendo ping a $linea para averiguar su MAC"
+			fi
+			ping $linea -c 4 > /dev/null
+			#repetimos procedimiento
+			ARP=$(/sbin/arp -a $linea)
+        		MAC=$(echo "$ARP" | awk '{print $4}')
+        		MAC=${MAC/ /}
+		fi
+		#el nombre de host a veces sale tambien
+		NAME=$(echo "$ARP" | awk '{print $1}')
+		#Si no se ha conseguido
+		for i in ${MACS_CONOCIDAS}; do
+			if [ "$i" == "$MAC" ]; then
+				if [ ! $LOG ]; then
+					echo "La IP $linea (HOST: $NAME MAC: $MAC) esta en la red conocida"
+				fi
+				SALTA_BUCLE=1
+				break
+			fi
+		done
+		if [ "$SALTA_BUCLE" == "1" ]; then
+			continue
+		fi
+		if [ ! $NOMAC ]; then
+			AVISO="Conectado $linea (HOST: $NAME MAC: $MAC)"
+		else
+			AVISO="Conectado $linea"
+		fi
+		if [ ! $NONOTIFY ]; then
+			#Envio de correo electronico
+			echo "$AVISO" |mail -s "Alerta de Red" $CORREO
+		fi
+		if [ $LOG ]; then
+			#modo log, una sola linea con la fecha
+			if [ ! $NOMAC ]; then
+				echo `/bin/date --rfc-3339=seconds`" HOST $linea ARP $ARP"
+			else
+				echo `/bin/date --rfc-3339=seconds`" HOST $linea"
+			fi
+		else
+			#modo normal
+			#Para enterar-se por la consola tambié
+			echo "$AVISO"
+		fi
+	done
+fi
